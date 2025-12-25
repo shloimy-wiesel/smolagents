@@ -50,6 +50,19 @@ class BaseSkill(ABC):
 
     @abstractmethod
     def __call__(self, *args, **kwargs) -> Any:
+        """
+        Invoke the skill.
+
+        Subclasses should override this method to implement skill-specific behavior.
+        The signature can be customized based on the skill's requirements.
+
+        Args:
+            *args: Positional arguments for skill invocation
+            **kwargs: Keyword arguments for skill invocation
+
+        Returns:
+            Result of skill invocation (type depends on specific skill implementation)
+        """
         pass
 
 
@@ -122,10 +135,16 @@ class Skill(BaseSkill):
         """
         Invoke the skill.
 
-        By default, this is a no-op. Subclasses can override to add custom behavior.
+        By default, this is a no-op that returns None. Subclasses can override to add
+        custom behavior. When invoked, the skill must be enabled or it will return None
+        without performing any action (consistent with get_tools() behavior).
+
+        Returns:
+            None by default, or None if skill is disabled. Subclasses may return other values.
         """
         if not self.enabled:
-            raise RuntimeError(f"Skill '{self.name}' is not enabled")
+            logger.debug(f"Skill '{self.name}' is not enabled, skipping invocation")
+            return None
         return None
 
     def __repr__(self):
