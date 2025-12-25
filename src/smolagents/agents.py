@@ -77,6 +77,7 @@ from .monitoring import (
     Monitor,
 )
 from .remote_executors import BlaxelExecutor, DockerExecutor, E2BExecutor, ModalExecutor, WasmExecutor
+from .skills import Skill, SkillCollection
 from .tools import BaseTool, Tool, validate_tool_arguments
 from .utils import (
     AgentError,
@@ -288,6 +289,9 @@ class MultiStepAgent(ABC):
             - Take the final answer, the agent's memory, and the agent itself as arguments.
             - Return a boolean indicating whether the final answer is valid.
         return_full_result (`bool`, default `False`): Whether to return the full [`RunResult`] object or just the final answer output from the agent run.
+        skills ([`~skills.SkillCollection`] | `list[`~skills.Skill`]`, *optional*): Skills that provide additional context
+            and instructions for the agent. Skills are disabled by default and must be explicitly enabled.
+            Can be a SkillCollection or a list of Skill objects.
     """
 
     def __init__(
@@ -308,6 +312,7 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        skills: SkillCollection | list[Skill] | None = None,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -336,6 +341,7 @@ class MultiStepAgent(ABC):
         self.instructions = instructions
         self._setup_managed_agents(managed_agents)
         self._setup_tools(tools, add_base_tools)
+        self._setup_skills(skills)
         self._validate_tools_and_managed_agents(tools, managed_agents)
 
         self.task: str | None = None
@@ -399,6 +405,26 @@ class MultiStepAgent(ABC):
                 }
             )
         self.tools.setdefault("final_answer", FinalAnswerTool())
+
+    def _setup_skills(self, skills: SkillCollection | list[Skill] | None) -> None:
+        """Setup skills for the agent.
+
+        Skills are disabled by default (opt-in). When provided, skill metadata will be
+        injected into the system prompt to allow the agent to discover and use them.
+
+        Args:
+            skills: A SkillCollection, list of Skill objects, or None to disable skills.
+        """
+        if skills is None:
+            self.skills: SkillCollection = SkillCollection()
+        elif isinstance(skills, SkillCollection):
+            self.skills = skills
+        elif isinstance(skills, list):
+            self.skills = SkillCollection(skills)
+        else:
+            raise TypeError(
+                f"skills must be a SkillCollection, list of Skill objects, or None, got {type(skills).__name__}"
+            )
 
     def _validate_tools_and_managed_agents(self, tools, managed_agents):
         tool_and_managed_agent_names = [tool.name for tool in tools]
@@ -1255,6 +1281,10 @@ class ToolCallingAgent(MultiStepAgent):
                 "custom_instructions": self.instructions,
             },
         )
+        # Append skills metadata if any skills are available
+        skills_prompt = self.skills.to_prompt()
+        if skills_prompt:
+            system_prompt += f"\n\n{skills_prompt}"
         return system_prompt
 
     def _step_stream(
@@ -1618,6 +1648,10 @@ class CodeAgent(MultiStepAgent):
                 "code_block_closing_tag": self.code_block_tags[1],
             },
         )
+        # Append skills metadata if any skills are available
+        skills_prompt = self.skills.to_prompt()
+        if skills_prompt:
+            system_prompt += f"\n\n{skills_prompt}"
         return system_prompt
 
     def _step_stream(
