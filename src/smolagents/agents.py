@@ -288,6 +288,7 @@ class MultiStepAgent(ABC):
             - Take the final answer, the agent's memory, and the agent itself as arguments.
             - Return a boolean indicating whether the final answer is valid.
         return_full_result (`bool`, default `False`): Whether to return the full [`RunResult`] object or just the final answer output from the agent run.
+        skills (`list[Skill]`, *optional*): Optional list of skills to register with the agent. Skills are disabled by default and must be explicitly enabled.
     """
 
     def __init__(
@@ -308,6 +309,7 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        skills: list | None = None,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -335,6 +337,7 @@ class MultiStepAgent(ABC):
         self.return_full_result = return_full_result
         self.instructions = instructions
         self._setup_managed_agents(managed_agents)
+        self._setup_skills(skills)
         self._setup_tools(tools, add_base_tools)
         self._validate_tools_and_managed_agents(tools, managed_agents)
 
@@ -385,11 +388,33 @@ class MultiStepAgent(ABC):
                 }
                 agent.output_type = "string"
 
+    def _setup_skills(self, skills: list | None = None) -> None:
+        """Setup skills registry and register provided skills."""
+        from .skills import Skill, SkillRegistry
+
+        self.skill_registry = SkillRegistry()
+        if skills:
+            for skill in skills:
+                if not isinstance(skill, Skill):
+                    raise TypeError(f"All skills must be instances of Skill, got {type(skill).__name__}")
+                self.skill_registry.register(skill)
+                logger.debug(f"Registered skill '{skill.name}' (enabled={skill.enabled})")
+
     def _setup_tools(self, tools, add_base_tools):
         assert all(isinstance(tool, BaseTool) for tool in tools), (
             "All elements must be instance of BaseTool (or a subclass)"
         )
         self.tools = {tool.name: tool for tool in tools}
+
+        # Add tools from enabled skills
+        skill_tools = self.skill_registry.get_all_tools()
+        for tool in skill_tools:
+            if tool.name in self.tools:
+                logger.warning(f"Skill tool '{tool.name}' conflicts with existing tool, skipping")
+            else:
+                self.tools[tool.name] = tool
+                logger.debug(f"Added tool '{tool.name}' from enabled skill")
+
         if add_base_tools:
             self.tools.update(
                 {
