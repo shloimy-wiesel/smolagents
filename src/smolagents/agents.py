@@ -77,6 +77,7 @@ from .monitoring import (
     Monitor,
 )
 from .remote_executors import BlaxelExecutor, DockerExecutor, E2BExecutor, ModalExecutor, WasmExecutor
+from .skills import Skill, SkillRegistry
 from .tools import BaseTool, Tool, validate_tool_arguments
 from .utils import (
     AgentError,
@@ -288,6 +289,11 @@ class MultiStepAgent(ABC):
             - Take the final answer, the agent's memory, and the agent itself as arguments.
             - Return a boolean indicating whether the final answer is valid.
         return_full_result (`bool`, default `False`): Whether to return the full [`RunResult`] object or just the final answer output from the agent run.
+        skills (`list[Skill]`, *optional*): Pre-loaded [`Skill`]s to make available to the agent.
+        skills_enabled (`bool`, default `False`): Whether to enable skills support. Skills are disabled by default (opt-in).
+        skills_discovery (`bool`, default `False`): Whether to auto-discover skills from standard locations
+            (~/.smolagents/skills/ and .smolagents/skills/).
+        skills_paths (`list[Path | str]`, *optional*): Additional paths to search for skills.
     """
 
     def __init__(
@@ -308,6 +314,10 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        skills: list[Skill] | None = None,
+        skills_enabled: bool = False,
+        skills_discovery: bool = False,
+        skills_paths: list[Path | str] | None = None,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -337,6 +347,12 @@ class MultiStepAgent(ABC):
         self._setup_managed_agents(managed_agents)
         self._setup_tools(tools, add_base_tools)
         self._validate_tools_and_managed_agents(tools, managed_agents)
+        self._setup_skills(
+            skills=skills,
+            skills_enabled=skills_enabled,
+            skills_discovery=skills_discovery,
+            skills_paths=skills_paths,
+        )
 
         self.task: str | None = None
         self.memory = AgentMemory(self.system_prompt)
@@ -411,6 +427,117 @@ class MultiStepAgent(ABC):
                 "Each tool or managed_agent should have a unique name! You passed these duplicate names: "
                 f"{[name for name in tool_and_managed_agent_names if tool_and_managed_agent_names.count(name) > 1]}"
             )
+
+    def _setup_skills(
+        self,
+        skills: list[Skill] | None = None,
+        skills_enabled: bool = False,
+        skills_discovery: bool = False,
+        skills_paths: list[Path | str] | None = None,
+    ) -> None:
+        """Setup skills registry and load skills.
+
+        Args:
+            skills: Pre-loaded skills to register.
+            skills_enabled: Whether skills are enabled (opt-in, default False).
+            skills_discovery: Whether to auto-discover skills from standard locations.
+            skills_paths: Additional paths to search for skills.
+        """
+        self.skills_enabled = skills_enabled
+        self.skill_registry = SkillRegistry()
+
+        if not skills_enabled:
+            # Skills disabled - skip all loading
+            return
+
+        # Register pre-loaded skills
+        if skills:
+            for skill in skills:
+                self.skill_registry.register_skill(skill)
+
+        # Auto-discover skills from standard locations
+        if skills_discovery:
+            custom_paths = [Path(p) for p in skills_paths] if skills_paths else None
+            outcome = self.skill_registry.discover(
+                roots=custom_paths,
+                include_user_skills=True,
+                include_workspace_skills=True,
+            )
+            if outcome.error_count > 0:
+                logger.warning(f"Failed to load {outcome.error_count} skills during discovery")
+
+        # Load skills from explicit paths (not in standard locations)
+        if skills_paths and not skills_discovery:
+            for path in skills_paths:
+                try:
+                    self.skill_registry.load_skill(path)
+                except Exception as e:
+                    logger.warning(f"Failed to load skill from {path}: {e}")
+
+    def _get_skills_prompt(self) -> str:
+        """Get the skills discovery prompt for the system prompt.
+
+        Returns:
+            Formatted skills prompt, or empty string if skills disabled or none available.
+        """
+        if not self.skills_enabled:
+            return ""
+
+        discovery_prompt = self.skill_registry.get_discovery_prompt()
+        activated_prompt = self.skill_registry.get_activated_skills_prompt()
+
+        parts = []
+        if discovery_prompt:
+            parts.append(discovery_prompt)
+        if activated_prompt:
+            parts.append(activated_prompt)
+
+        return "\n\n".join(parts)
+
+    def enable_skill(self, name: str) -> bool:
+        """Enable a skill by name.
+
+        Args:
+            name: Skill name.
+
+        Returns:
+            True if skill was found and enabled.
+        """
+        return self.skill_registry.enable_skill(name)
+
+    def disable_skill(self, name: str) -> bool:
+        """Disable a skill by name.
+
+        Args:
+            name: Skill name.
+
+        Returns:
+            True if skill was found and disabled.
+        """
+        return self.skill_registry.disable_skill(name)
+
+    def activate_skill(self, name: str) -> str:
+        """Activate a skill and get its full instructions.
+
+        Args:
+            name: Skill name.
+
+        Returns:
+            Full skill instructions.
+
+        Raises:
+            KeyError: If skill not found.
+            ValueError: If skill is disabled.
+        """
+        return self.skill_registry.activate_skill(name)
+
+    def list_skills(self) -> list[dict]:
+        """List all registered skills with their metadata.
+
+        Returns:
+            List of skill dictionaries.
+        """
+        return self.skill_registry.list_skills()
 
     def _setup_step_callbacks(self, step_callbacks):
         # Initialize step callbacks registry
@@ -1247,12 +1374,18 @@ class ToolCallingAgent(MultiStepAgent):
         return list(self.tools.values()) + list(self.managed_agents.values())
 
     def initialize_system_prompt(self) -> str:
+        # Build custom instructions including skills
+        custom_instructions = self.instructions or ""
+        skills_prompt = self._get_skills_prompt()
+        if skills_prompt:
+            custom_instructions = f"{custom_instructions}\n\n{skills_prompt}" if custom_instructions else skills_prompt
+
         system_prompt = populate_template(
             self.prompt_templates["system_prompt"],
             variables={
                 "tools": self.tools,
                 "managed_agents": self.managed_agents,
-                "custom_instructions": self.instructions,
+                "custom_instructions": custom_instructions if custom_instructions else None,
             },
         )
         return system_prompt
@@ -1603,6 +1736,12 @@ class CodeAgent(MultiStepAgent):
             )
 
     def initialize_system_prompt(self) -> str:
+        # Build custom instructions including skills
+        custom_instructions = self.instructions or ""
+        skills_prompt = self._get_skills_prompt()
+        if skills_prompt:
+            custom_instructions = f"{custom_instructions}\n\n{skills_prompt}" if custom_instructions else skills_prompt
+
         system_prompt = populate_template(
             self.prompt_templates["system_prompt"],
             variables={
@@ -1613,7 +1752,7 @@ class CodeAgent(MultiStepAgent):
                     if "*" in self.authorized_imports
                     else str(self.authorized_imports)
                 ),
-                "custom_instructions": self.instructions,
+                "custom_instructions": custom_instructions if custom_instructions else None,
                 "code_block_opening_tag": self.code_block_tags[0],
                 "code_block_closing_tag": self.code_block_tags[1],
             },
