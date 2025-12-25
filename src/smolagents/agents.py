@@ -77,6 +77,7 @@ from .monitoring import (
     Monitor,
 )
 from .remote_executors import BlaxelExecutor, DockerExecutor, E2BExecutor, ModalExecutor, WasmExecutor
+from .skills import SkillsConfig, SkillsManager
 from .tools import BaseTool, Tool, validate_tool_arguments
 from .utils import (
     AgentError,
@@ -288,6 +289,8 @@ class MultiStepAgent(ABC):
             - Take the final answer, the agent's memory, and the agent itself as arguments.
             - Return a boolean indicating whether the final answer is valid.
         return_full_result (`bool`, default `False`): Whether to return the full [`RunResult`] object or just the final answer output from the agent run.
+        skills_config ([`~skills.SkillsConfig`], *optional*): Configuration for Agent Skills support.
+            Skills are disabled by default (opt-in). To enable, pass a SkillsConfig with enabled=True.
     """
 
     def __init__(
@@ -308,6 +311,7 @@ class MultiStepAgent(ABC):
         final_answer_checks: list[Callable] | None = None,
         return_full_result: bool = False,
         logger: AgentLogger | None = None,
+        skills_config: SkillsConfig | None = None,
     ):
         self.agent_name = self.__class__.__name__
         self.model = model
@@ -337,6 +341,9 @@ class MultiStepAgent(ABC):
         self._setup_managed_agents(managed_agents)
         self._setup_tools(tools, add_base_tools)
         self._validate_tools_and_managed_agents(tools, managed_agents)
+
+        # Setup skills manager
+        self.skills_manager = SkillsManager(skills_config)
 
         self.task: str | None = None
         self.memory = AgentMemory(self.system_prompt)
@@ -855,6 +862,19 @@ You have been provided with these additional arguments, that you can access dire
         """Creates a rich tree visualization of the agent's structure."""
         self.logger.visualize_agent_tree(self)
 
+    def get_skill_instructions(self, skill_name: str) -> str | None:
+        """Get the full instructions for a skill by name.
+
+        This activates the skill by loading its full SKILL.md content.
+
+        Args:
+            skill_name: The name of the skill to retrieve.
+
+        Returns:
+            The full skill instructions, or None if skills are disabled or skill not found.
+        """
+        return self.skills_manager.get_skill_instructions(skill_name)
+
     def replay(self, detailed: bool = False):
         """Prints a pretty replay of the agent's steps.
 
@@ -1255,6 +1275,10 @@ class ToolCallingAgent(MultiStepAgent):
                 "custom_instructions": self.instructions,
             },
         )
+        # Append skills prompt if skills are enabled
+        skills_prompt = self.skills_manager.generate_prompt()
+        if skills_prompt:
+            system_prompt += "\n\n" + skills_prompt
         return system_prompt
 
     def _step_stream(
@@ -1618,6 +1642,10 @@ class CodeAgent(MultiStepAgent):
                 "code_block_closing_tag": self.code_block_tags[1],
             },
         )
+        # Append skills prompt if skills are enabled
+        skills_prompt = self.skills_manager.generate_prompt()
+        if skills_prompt:
+            system_prompt += "\n\n" + skills_prompt
         return system_prompt
 
     def _step_stream(
